@@ -9,6 +9,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CURRENCY_EURO, UnitOfEnergy
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.typing import DiscoveryInfoType
 
 from .api import ElectricIrelandScraper
@@ -18,6 +19,9 @@ from .sensor_base import Sensor
 PLATFORM = "sensor"
 
 LOGGER = logging.getLogger(__name__)
+
+# How often to refresh appliance data from Electric Ireland (once per day is plenty)
+APPLIANCE_REFRESH_INTERVAL = timedelta(hours=24)
 
 
 async def async_setup_entry(
@@ -33,6 +37,13 @@ async def async_setup_entry(
     ei_api = ElectricIrelandScraper(username, password, account_number)
     appliance_store = ApplianceUsageStore(ei_api)
     await appliance_store.async_refresh()
+
+    # Schedule periodic refresh of appliance data centrally, so individual
+    # sensors don't each trigger a full login cycle on every update.
+    async def _scheduled_refresh(now=None):
+        await appliance_store.async_refresh()
+
+    async_track_time_interval(hass, _scheduled_refresh, APPLIANCE_REFRESH_INTERVAL)
 
     sensors = [
         HourlyConsumptionSensor(device_id=config_entry.entry_id, ei_api=ei_api),
@@ -199,7 +210,9 @@ class ApplianceUsageSensor(SensorEntity):
         self._attr_extra_state_attributes = {}
 
     async def async_update(self):
-        data = await self._appliance_store.async_refresh()
+        # Read from the cached data — refresh is handled centrally by
+        # async_track_time_interval so we don't trigger a new login here.
+        data = self._appliance_store.data
         appliances = data["appliances"]
         if not appliances and data["total_consumption"] is None:
             self._attr_native_value = None
@@ -235,6 +248,7 @@ class ApplianceUsageSensor(SensorEntity):
 
         self._attr_extra_state_attributes = attributes
 
+
 class ApplianceConsumptionSensor(SensorEntity):
     def __init__(self, device_id: str, appliance_store: ApplianceUsageStore, category: str):
         self._appliance_store = appliance_store
@@ -248,7 +262,9 @@ class ApplianceConsumptionSensor(SensorEntity):
         self._attr_extra_state_attributes = {}
 
     async def async_update(self):
-        data = await self._appliance_store.async_refresh()
+        # Read from the cached data — refresh is handled centrally by
+        # async_track_time_interval so we don't trigger a new login here.
+        data = self._appliance_store.data
         appliance = data["appliances"].get(self._category)
         if appliance is None:
             self._attr_native_value = None

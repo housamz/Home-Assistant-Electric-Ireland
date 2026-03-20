@@ -12,6 +12,11 @@ LOGGER = logging.getLogger(DOMAIN)
 
 BASE_URL = "https://youraccountonline.electricireland.ie"
 
+# Timeout (in seconds) for all HTTP requests to Electric Ireland.
+# Without this, a slow/unreachable server will hang indefinitely and
+# cause Home Assistant's watchdog to kill and restart the process.
+REQUEST_TIMEOUT = 30
+
 
 class ElectricIrelandScraper:
     def __init__(self, username, password, account_number):
@@ -40,8 +45,8 @@ class ElectricIrelandScraper:
     def __login_and_get_meter_ids(self, session):
         # REQUEST 1: Get the Source token, and initialize the session
         LOGGER.debug("Getting Source Token...")
-        res1 = session.get(f"{BASE_URL}/")
         try:
+            res1 = session.get(f"{BASE_URL}/", timeout=REQUEST_TIMEOUT)
             res1.raise_for_status()
         except RequestException as err:
             LOGGER.error(f"Failed to Get Source Token: {err}")
@@ -61,20 +66,21 @@ class ElectricIrelandScraper:
 
         # REQUEST 2: Perform Login
         LOGGER.debug("Performing Login...")
-        res2 = session.post(
-            f"{BASE_URL}/",
-            data={
-                "LoginFormData.UserName": self.__username,
-                "LoginFormData.Password": self.__password,
-                "rvt": rvt,
-                "Source": source,
-                "PotText": "",
-                "__EiTokPotText": "",
-                "ReturnUrl": "",
-                "AccountNumber": "",
-            },
-        )
         try:
+            res2 = session.post(
+                f"{BASE_URL}/",
+                data={
+                    "LoginFormData.UserName": self.__username,
+                    "LoginFormData.Password": self.__password,
+                    "rvt": rvt,
+                    "Source": source,
+                    "PotText": "",
+                    "__EiTokPotText": "",
+                    "ReturnUrl": "",
+                    "AccountNumber": "",
+                },
+                timeout=REQUEST_TIMEOUT,
+            )
             res2.raise_for_status()
         except RequestException as err:
             LOGGER.error(f"Failed to Perform Login: {err}")
@@ -111,11 +117,12 @@ class ElectricIrelandScraper:
         for form_input in event_form.find_all("input"):
             req3[form_input.get("name")] = form_input.get("value")
 
-        res3 = session.post(
-            f"{BASE_URL}/Accounts/OnEvent",
-            data=req3,
-        )
         try:
+            res3 = session.post(
+                f"{BASE_URL}/Accounts/OnEvent",
+                data=req3,
+                timeout=REQUEST_TIMEOUT,
+            )
             res3.raise_for_status()
         except RequestException as err:
             LOGGER.error(f"Failed to Navigate to Insights: {err}")
@@ -167,7 +174,7 @@ class MeterInsightScraper:
         LOGGER.debug("Hourly usage request: url=%s params=%s", url, {"date": date_str})
 
         try:
-            response = self.__session.get(url, params={"date": date_str})
+            response = self.__session.get(url, params={"date": date_str}, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
         except RequestException as err:
             LOGGER.error(f"Failed to get hourly usage data: {err}")
@@ -205,7 +212,7 @@ class MeterInsightScraper:
 
         # Tariff buckets as seen in response on Smart TOU plan
         usage_tariff_keys = ("flatRate", "offPeak", "midPeak", "onPeak")
-        
+
         for dp in raw_datapoints:
             end_date_str = dp.get("endDate")
 
@@ -221,7 +228,7 @@ class MeterInsightScraper:
                 LOGGER.warning(f"Failed to parse date {end_date_str}: {err}")
                 continue
 
-            # Pick the first non‑null tariff bucket
+            # Pick the first non-null tariff bucket
             usage_entry = next(
                 (dp[key] for key in usage_tariff_keys if dp.get(key) is not None),
                 None
@@ -258,7 +265,7 @@ class MeterInsightScraper:
         }
         LOGGER.debug("Daily usage request: url=%s params=%s", url, params)
         try:
-            response = self.__session.get(url, params=params)
+            response = self.__session.get(url, params=params, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
         except RequestException as err:
             LOGGER.error(f"Failed to get daily usage data: {err}")
@@ -327,7 +334,7 @@ class MeterInsightScraper:
         }
         LOGGER.debug("Appliance usage request: url=%s params=%s", url, params)
         try:
-            response = self.__session.get(url, params=params)
+            response = self.__session.get(url, params=params, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
         except RequestException as err:
             LOGGER.error(f"Failed to get appliance usage data: {err}")
