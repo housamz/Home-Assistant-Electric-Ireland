@@ -27,8 +27,10 @@ class ElectricIrelandScraper:
 
         meter_ids = self.__login_and_get_meter_ids(session)
         if not meter_ids:
+            LOGGER.debug("Meter ID lookup returned no data")
             return
 
+        LOGGER.debug("MeterInsight session initialized for meter IDs: %s", meter_ids)
         self.__scraper = MeterInsightScraper(session, meter_ids)
 
     @property
@@ -162,6 +164,7 @@ class MeterInsightScraper:
         LOGGER.debug(f"Getting hourly data for {date_str}...")
 
         url = f"{BASE_URL}/MeterInsight/{self.__partner}/{self.__contract}/{self.__premise}/hourly-usage"
+        LOGGER.debug("Hourly usage request: url=%s params=%s", url, {"date": date_str})
 
         try:
             response = self.__session.get(url, params={"date": date_str})
@@ -181,6 +184,14 @@ class MeterInsightScraper:
         except Exception as err:
             LOGGER.error(f"Failed to parse JSON: {err}. Response: {response.text[:500]}")
             return []
+
+        LOGGER.debug(
+            "Hourly usage response: status=%s content_type=%s isSuccess=%s items=%s",
+            response.status_code,
+            content_type,
+            data.get("isSuccess"),
+            len(data.get("data", [])),
+        )
 
         if not data.get("isSuccess"):
             LOGGER.error(f"API returned error: {data.get('message')}")
@@ -223,4 +234,146 @@ class MeterInsightScraper:
                     "intervalEnd": interval_end,
                 })
 
+        if datapoints:
+            LOGGER.debug("Hourly usage sample for %s: %s", date_str, datapoints[0])
+        else:
+            LOGGER.debug("Hourly usage returned no datapoints for %s", date_str)
+
         return datapoints
+
+    def get_daily_data(self, start_date, end_date):
+        """Fetch daily usage data for a date range.
+
+        Args:
+            start_date: datetime.date or datetime.datetime (inclusive)
+            end_date: datetime.date or datetime.datetime (inclusive)
+
+        Returns:
+            List of datapoints with 'date', 'consumption', 'cost' keys
+        """
+        url = f"{BASE_URL}/MeterInsight/{self.__partner}/{self.__contract}/{self.__premise}/usage-daily"
+        params = {
+            "start": start_date.strftime("%Y-%m-%d"),
+            "end": end_date.strftime("%Y-%m-%d"),
+        }
+        LOGGER.debug("Daily usage request: url=%s params=%s", url, params)
+        try:
+            response = self.__session.get(url, params=params)
+            response.raise_for_status()
+        except RequestException as err:
+            LOGGER.error(f"Failed to get daily usage data: {err}")
+            return []
+
+        content_type = response.headers.get("content-type", "")
+        if "application/json" not in content_type:
+            LOGGER.error(f"Expected JSON but got {content_type}. Response: {response.text[:500]}")
+            return []
+
+        try:
+            data = response.json()
+        except Exception as err:
+            LOGGER.error(f"Failed to parse JSON: {err}. Response: {response.text[:500]}")
+            return []
+
+        LOGGER.debug(
+            "Daily usage response: status=%s content_type=%s isSuccess=%s items=%s",
+            response.status_code,
+            content_type,
+            data.get("isSuccess"),
+            len(data.get("data", [])),
+        )
+
+        if not data.get("isSuccess"):
+            LOGGER.error(f"API returned error: {data.get('message')}")
+            return []
+
+        raw_datapoints = data.get("data", [])
+        LOGGER.debug(f"Found {len(raw_datapoints)} daily datapoints for {params}")
+
+        usage_tariff_keys = ("flatRate", "offPeak", "midPeak", "onPeak")
+        datapoints = []
+        for dp in raw_datapoints:
+            date_str = dp.get("startDate")
+            if not date_str:
+                continue
+            try:
+                dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+                date = dt.date()
+            except (ValueError, AttributeError) as err:
+                LOGGER.warning(f"Failed to parse date {date_str}: {err}")
+                continue
+
+            usage_entry = next((dp[key] for key in usage_tariff_keys if dp.get(key) is not None), None)
+            if usage_entry is not None:
+                datapoints.append({
+                    "date": date,
+                    "consumption": usage_entry.get("consumption"),
+                    "cost": usage_entry.get("cost"),
+                })
+
+        if datapoints:
+            LOGGER.debug("Daily usage sample for %s: %s", params, datapoints[0])
+        else:
+            LOGGER.debug("Daily usage returned no datapoints for %s", params)
+
+        return datapoints
+
+    def get_appliance_usage(self, bill_start_date, bill_end_date):
+        """Fetch appliance usage for a billing period."""
+        url = f"{BASE_URL}/MeterInsight/{self.__partner}/{self.__contract}/{self.__premise}/appliance-usage"
+        params = {
+            "start": bill_start_date.strftime("%Y-%m-%d"),
+            "end": bill_end_date.strftime("%Y-%m-%d"),
+        }
+        LOGGER.debug("Appliance usage request: url=%s params=%s", url, params)
+        try:
+            response = self.__session.get(url, params=params)
+            response.raise_for_status()
+        except RequestException as err:
+            LOGGER.error(f"Failed to get appliance usage data: {err}")
+            return []
+
+        content_type = response.headers.get("content-type", "")
+        if "application/json" not in content_type:
+            LOGGER.error(f"Expected JSON but got {content_type}. Response: {response.text[:500]}")
+            return []
+
+        try:
+            data = response.json()
+        except Exception as err:
+            LOGGER.error(f"Failed to parse JSON: {err}. Response: {response.text[:500]}")
+            return []
+
+        LOGGER.debug(
+            "Appliance usage response: status=%s content_type=%s isSuccess=%s items=%s",
+            response.status_code,
+            content_type,
+            data.get("isSuccess"),
+            len(data.get("data", [])),
+        )
+
+        if not data.get("isSuccess"):
+            LOGGER.error(f"API returned error: {data.get('message')}")
+            return None
+
+        usage_data = data.get("data", [])
+        if not usage_data:
+            return None
+
+        bill_data = usage_data[0]
+        appliances = bill_data.get("appliances", [])
+        LOGGER.debug(
+            "Found %s appliances for bill period %s to %s",
+            len(appliances),
+            bill_data.get("billStartDate"),
+            bill_data.get("billEndDate"),
+        )
+        if appliances:
+            LOGGER.debug("Appliance usage sample for %s: %s", params, appliances[0])
+        else:
+            LOGGER.debug("Appliance usage returned no appliances for %s", params)
+        return {
+            "bill_start_date": bill_data.get("billStartDate"),
+            "bill_end_date": bill_data.get("billEndDate"),
+            "appliances": appliances,
+        }

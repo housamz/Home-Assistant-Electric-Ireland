@@ -32,15 +32,24 @@ class Sensor(PollUpdateMixin, HistoricalSensor, SensorEntity):
     #                    present state
     #
 
-    def __init__(self, device_id: str, ei_api: ElectricIrelandScraper, name: str, metric: str, measurement_unit: str,
-                 device_class: SensorDeviceClass):
+    def __init__(
+        self,
+        device_id: str,
+        ei_api: ElectricIrelandScraper,
+        name: str,
+        entity_key: str,
+        metric_key: str,
+        measurement_unit: str | None,
+        device_class: SensorDeviceClass | None,
+        history_granularity: str = "hourly",
+    ):
         super().__init__()
 
         self._attr_has_entity_name = True
         self._attr_name = f"Electric Ireland {name}"
 
-        self._attr_unique_id = f"{DOMAIN}_{metric}_{device_id}"
-        self._attr_entity_id = f"{DOMAIN}_{metric}_{device_id}"
+        self._attr_unique_id = f"{DOMAIN}_{entity_key}_{device_id}"
+        self._attr_entity_id = f"{DOMAIN}_{entity_key}_{device_id}"
 
         self._attr_entity_registry_enabled_default = True
         self._attr_state = None
@@ -50,10 +59,16 @@ class Sensor(PollUpdateMixin, HistoricalSensor, SensorEntity):
         self._attr_device_class = device_class
 
         self._api: ElectricIrelandScraper = ei_api
-        self._metric = metric
+        self._metric_key = metric_key
+        self._history_granularity = history_granularity
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
+
+    def _friendly_name_internal(self) -> str | None:
+        """Compatibility shim for homeassistant_historical_sensor on newer HA."""
+        name = self.name
+        return name if isinstance(name, str) else None
 
     async def async_update_historical(self):
         # Fill `HistoricalSensor._attr_historical_states` with HistoricalState's
@@ -71,34 +86,14 @@ class Sensor(PollUpdateMixin, HistoricalSensor, SensorEntity):
             LOGGER.error("Failed to get scraper - login may have failed")
             return
 
-        hist_states: List[HistoricalState] = []
-
         now = datetime.now(UTC)
         # Build a datetime for "yesterday" since data is never published on the same day
         yesterday = datetime(year=now.year, month=now.month, day=now.day, tzinfo=UTC) - timedelta(days=1)
 
-        executor_results = []
-
-        with ThreadPoolExecutor(max_workers=PARALLEL_DAYS) as executor:
-            current_date = yesterday - timedelta(days=LOOKUP_DAYS)
-            while current_date <= yesterday:
-                LOGGER.debug(f"Submitting {current_date}")
-                results = loop.run_in_executor(executor, scraper.get_data, current_date)
-                executor_results.append(results)
-                current_date += timedelta(days=1)
-
-        LOGGER.info("Finished launching jobs")
-
-        # For every launched job
-        for executor_result in executor_results:
-            # And now we parse the datapoints
-            for datapoint in await executor_result:
-                state = datapoint.get(self._metric)
-                dt = datetime.fromtimestamp(datapoint.get("intervalEnd"), tz=UTC)
-                hist_states.append(HistoricalState(
-                    state=state,
-                    dt=dt,
-                ))
+        if self._history_granularity == "daily":
+            hist_states = await self._async_get_daily_historical_states(loop, scraper, yesterday)
+        else:
+            hist_states = await self._async_get_hourly_historical_states(loop, scraper, yesterday)
 
         hist_states.sort(key=lambda d: d.dt)
 
@@ -127,7 +122,70 @@ class Sensor(PollUpdateMixin, HistoricalSensor, SensorEntity):
             min_dt, max_dt = valid_datapoints[0].dt, valid_datapoints[len(valid_datapoints) - 1].dt
             LOGGER.info(f"Found {len(valid_datapoints)} valid datapoints, ranging from {min_dt} to {max_dt}")
 
-        self._attr_historical_states = [d for d in hist_states if d.state]
+        self._attr_historical_states = [d for d in hist_states if d.state is not None]
+
+    async def _async_get_hourly_historical_states(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        scraper,
+        yesterday: datetime,
+    ) -> List[HistoricalState]:
+        hist_states: List[HistoricalState] = []
+        executor_results = []
+
+        with ThreadPoolExecutor(max_workers=PARALLEL_DAYS) as executor:
+            current_date = yesterday - timedelta(days=LOOKUP_DAYS)
+            while current_date <= yesterday:
+                LOGGER.debug(f"Submitting {current_date}")
+                results = loop.run_in_executor(executor, scraper.get_data, current_date)
+                executor_results.append(results)
+                current_date += timedelta(days=1)
+
+        LOGGER.info("Finished launching jobs")
+
+        for executor_result in executor_results:
+            for datapoint in await executor_result:
+                interval_end = datapoint.get("intervalEnd")
+                if interval_end is None:
+                    continue
+
+                hist_states.append(
+                    HistoricalState(
+                        state=datapoint.get(self._metric_key),
+                        dt=datetime.fromtimestamp(interval_end, tz=UTC),
+                    )
+                )
+
+        return hist_states
+
+    async def _async_get_daily_historical_states(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        scraper,
+        yesterday: datetime,
+    ) -> List[HistoricalState]:
+        start_date = yesterday - timedelta(days=LOOKUP_DAYS)
+        raw_datapoints = await loop.run_in_executor(
+            None,
+            scraper.get_daily_data,
+            start_date,
+            yesterday,
+        )
+
+        hist_states: List[HistoricalState] = []
+        for datapoint in raw_datapoints:
+            day = datapoint.get("date")
+            if day is None:
+                continue
+
+            hist_states.append(
+                HistoricalState(
+                    state=datapoint.get(self._metric_key),
+                    dt=datetime(day.year, day.month, day.day, tzinfo=UTC),
+                )
+            )
+
+        return hist_states
 
     @property
     def statistic_id(self) -> str:
@@ -155,17 +213,19 @@ class Sensor(PollUpdateMixin, HistoricalSensor, SensorEntity):
 
         accumulated = latest["sum"] if latest else 0
 
-        def hour_block_for_hist_state(hist_state: HistoricalState) -> datetime:
+        def block_for_hist_state(hist_state: HistoricalState) -> datetime:
+            if self._history_granularity == "daily":
+                return hist_state.dt.replace(hour=0, minute=0, second=0, microsecond=0)
+
             # XX:00:00 states belongs to previous hour block
             if hist_state.dt.minute == 0 and hist_state.dt.second == 0:
                 dt = hist_state.dt - timedelta(hours=1)
                 return dt.replace(minute=0, second=0, microsecond=0)
 
-            else:
-                return hist_state.dt.replace(minute=0, second=0, microsecond=0)
+            return hist_state.dt.replace(minute=0, second=0, microsecond=0)
 
         ret = []
-        for dt, collection_it in itertools.groupby(hist_states, key=hour_block_for_hist_state):
+        for dt, collection_it in itertools.groupby(hist_states, key=block_for_hist_state):
             collection = list(collection_it)
             mean = statistics.mean([x.state for x in collection])
             partial_sum = sum([x.state for x in collection])

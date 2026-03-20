@@ -50,22 +50,36 @@ into the wrong hour. If you take the previous and after, the total should be the
 
 ### Sensors
 
-* **Electric Ireland Consumption**: reports consumed data in kWh, in 30 minute intervals.
-* **Electric Ireland Cost**: reports the total cost charged in 60 minute intervals (without discounts and without
-  standing charge, just the gross "usage" as per the contracted tariff).
+This integration now provides the following sensors:
 
-### Data Retrieval Flow
+* **Hourly Consumption**: Reports energy consumed in kWh, in hourly intervals.
+* **Hourly Cost**: Reports usage cost in EUR, in hourly intervals.
+* **Daily Consumption**: Reports total daily energy consumption in kWh.
+* **Daily Cost**: Reports total daily cost in EUR.
+* **Appliance Usage**: Aggregates and exposes per-appliance consumption and cost for the current billing period.
+* **Per-Appliance Consumption**: Individual sensors for each detected appliance category, showing consumption and cost for the billing period.
 
-1. Open a `requests` session against Electric Ireland website, and:
-    1. Create a GET request to retrieve the cookies and the state.
-    2. Do a POST request to login into Electric Ireland.
-    3. Scrape the dashboard to try to find the `div` with the target Account Number.
-    4. Navigate to the Insights page for that Account Number.
-2. Now, once we have that Insights page, we don't need the ELectric Ireland session anymore:
-    1. The page contains a payload to call Bidgely API (data API provider for Electric Ireland).
-    2. Authenticate using that payload against Bidgely API (no need for session or cookies).
-    3. Send requests to the API to fetch the data for required intervals.
-    4. Profit! 🎉
+All sensors provide detailed attributes, including bill period, total consumption/cost, and per-appliance breakdowns where applicable.
+
+### Data Retrieval Flow & Enhancements
+
+* Improved login and scraping flow for Electric Ireland, with robust error handling and logging.
+* Uses a dedicated MeterInsight API to fetch hourly, daily, and appliance usage data.
+* Supports multiple tariff types (flatRate, offPeak, midPeak, onPeak) for accurate reporting.
+* Appliance usage is now retrieved and exposed for the current billing period, including per-appliance breakdowns.
+* Historical data fetching is parallelized for efficiency.
+* Enhanced error handling and logging for missing or invalid data.
+
+#### Data Retrieval Steps
+
+1. Open a `requests` session against the Electric Ireland website:
+  1. GET request to retrieve cookies and state.
+  2. POST request to log in.
+  3. Scrape dashboard to find the target Account Number.
+  4. Navigate to the Insights page for that account.
+2. Extract credentials and meter IDs from the Insights page.
+3. Use the MeterInsight API to fetch hourly, daily, and appliance usage data for the account.
+4. Data is parsed and exposed via Home Assistant sensors, including per-appliance breakdowns.
 
 ### Schedule
 
